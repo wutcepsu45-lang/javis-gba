@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#14121c">
+<title>Javis GBA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;600&family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#14121c; --panel:#1e1b29; --panel2:#272337; --line:#36304a;
+  --text:#ece8f6; --muted:#9b94b3; --accent:#8c7cf0; --accent2:#5fd3b5; --danger:#ef6b7b;
+  --r:14px; color-scheme:dark;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+  font-family:"IBM Plex Sans Thai",system-ui,sans-serif;overscroll-behavior:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+
+/* ---------- Library ---------- */
+#library{min-height:100%;padding-block:calc(env(safe-area-inset-top) + 20px) 110px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+header{display:flex;align-items:center;gap:12px;margin-bottom:22px}
+.logo{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--accent),#5b4bc4);
+  font-family:"Press Start 2P",monospace;font-size:12px;color:#fff;box-shadow:0 6px 18px #8c7cf044}
+header h1{margin:0;font-family:"Press Start 2P",monospace;font-size:15px;letter-spacing:.5px}
+header p{margin:4px 0 0;color:var(--muted);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.card{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;text-align:left;display:flex;flex-direction:column;transition:transform .12s}
+.card:active{transform:scale(.97)}
+.cart{aspect-ratio:4/3;display:grid;place-items:center;position:relative;
+  font-family:"Press Start 2P",monospace;font-size:26px;color:#fff;text-shadow:0 3px 0 #0005}
+.cart::after{content:"";position:absolute;inset:auto 14% 10% 14%;height:6px;border-radius:3px;background:#0003}
+.meta{padding:10px 12px 12px}
+.name{font-weight:600;font-size:14px;line-height:1.3;word-break:break-word;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sub{color:var(--muted);font-size:12px;margin-top:4px}
+.more{position:absolute;top:6px;right:6px;width:32px;height:32px;border-radius:50%;
+  background:#0006;color:#fff;font-size:18px;line-height:32px}
+.empty{text-align:center;padding:60px 20px;color:var(--muted)}
+.empty .big{font-family:"Press Start 2P",monospace;font-size:40px;color:var(--line);margin-bottom:18px}
+.empty b{color:var(--text)}
+.fab{position:fixed;right:18px;bottom:calc(env(safe-area-inset-bottom) + 18px);
+  background:var(--accent);color:#fff;padding:15px 22px;border-radius:30px;font-weight:600;
+  box-shadow:0 8px 24px #0008;display:flex;gap:8px;align-items:center}
+.fab span{font-size:20px;line-height:1}
+.note{color:var(--muted);font-size:12px;margin-top:26px;line-height:1.6}
+
+/* ---------- Sheet ---------- */
+.scrim{position:fixed;inset:0;background:#0009;display:none;align-items:flex-end;z-index:20}
+.scrim.on{display:flex}
+.sheet{width:100%;background:var(--panel);border-radius:18px 18px 0 0;
+  padding:16px 16px calc(env(safe-area-inset-bottom) + 16px)}
+.sheet h3{margin:4px 4px 12px;font-size:15px}
+.sheet button{display:block;width:100%;text-align:left;padding:14px;border-radius:10px;font-size:15px}
+.sheet button:active{background:var(--panel2)}
+.sheet .del{color:var(--danger)}
+.sheet .del.arm{background:var(--danger);color:#fff}
+#renameForm{display:flex;gap:8px;padding:6px 4px 0}
+#renameForm[hidden]{display:none}
+#renameInput{flex:1;min-width:0;background:var(--bg);border:1px solid var(--line);color:var(--text);
+  border-radius:10px;padding:12px;font:inherit;font-size:16px}
+#renameForm .save{width:auto;background:var(--accent);color:#fff;text-align:center;padding:12px 16px}
+:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
+.toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:var(--panel2);
+  border:1px solid var(--line);padding:10px 16px;border-radius:10px;font-size:14px;z-index:30;
+  opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.on{opacity:1}
+
+/* ---------- Player ---------- */
+#player{position:fixed;inset:0;background:#000;display:none;z-index:10}
+#player.on{display:block}
+#game{width:100%;height:100%}
+.back{position:absolute;top:calc(env(safe-area-inset-top) + 8px);left:8px;z-index:50;
+  background:#0008;color:#fff;border-radius:20px;padding:7px 14px;font-size:13px;
+  backdrop-filter:blur(4px);transition:opacity .4s}
+.back.dim{opacity:.25}
+/* portrait: keep the back pill clear of the game picture */
+@media (orientation:portrait){ #player.on #game{padding-top:calc(env(safe-area-inset-top) + 48px);box-sizing:border-box} }
+
+/* ---------- Controller panel ---------- */
+.pad{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin:0 0 18px;
+  display:flex;flex-direction:column;gap:10px}
+.pad-head{display:flex;align-items:center;gap:10px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--muted);flex:none}
+.dot.on{background:var(--accent2);box-shadow:0 0 0 4px #5fd3b533}
+.pad-title{font-weight:600;font-size:14px}
+.pad-sub{color:var(--muted);font-size:12px}
+.pad-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:14px}
+.seg{display:flex;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:hidden;flex:none}
+.seg button{padding:7px 11px;font-size:13px;color:var(--muted)}
+.seg button.sel{background:var(--accent);color:#fff}
+</style>
+</head>
+<body>
+
+<main id="library">
+  <header>
+    <div class="logo">JV</div>
+    <div><h1>JAVIS GBA</h1><p>เกม Game Boy Advance ของคุณ</p></div>
+  </header>
+  <section class="pad" aria-label="จอยเกม">
+    <div class="pad-head">
+      <span class="dot" id="padDot"></span>
+      <div><div class="pad-title" id="padName">ยังไม่พบจอย</div>
+        <div class="pad-sub" id="padHint">เปิด GameSir ในโหมด Android (M + A) แล้วกดปุ่มใดก็ได้</div></div>
+    </div>
+    <div class="pad-row"><span>จอยบนจอ</span>
+      <div class="seg" id="segTouch"><button data-v="auto">อัตโนมัติ</button><button data-v="show">แสดง</button><button data-v="hide">ซ่อน</button></div></div>
+    <div class="pad-row"><span>ปุ่ม A / B ของจอย</span>
+      <div class="seg" id="segAB"><button data-v="label">ตามตัวอักษร</button><button data-v="swap">สลับ</button></div></div>
+  </section>
+  <div id="list" class="grid"></div>
+  <div id="empty" class="empty" hidden>
+    <div class="big">▶︎</div>
+    ยังไม่มีเกมในคลัง<br>กด <b>เพิ่มเกม</b> แล้วเลือกไฟล์ <b>.gba</b> หรือ <b>.zip</b>
+  </div>
+  <p class="note">ใช้ไฟล์เกมที่คุณ dump จากตลับของตัวเอง หรือเกม homebrew<br>
+    เซฟในเกมบันทึกอัตโนมัติ · Save/Load State อยู่ในเมนูระหว่างเล่น<br>
+    จอย: L1/R1 = L/R · View/Start = Select/Start · R2 ค้าง = เร่งเกม · L2 = Quick Save · สติ๊กซ้ายเดินได้</p>
+</main>
+
+<button class="fab" id="add"><span>+</span>เพิ่มเกม</button>
+<input type="file" id="file" accept=".gba,.zip,.7z,.agb,.bin" multiple hidden>
+
+<div class="scrim" id="scrim">
+  <div class="sheet">
+    <h3 id="sheetTitle"></h3>
+    <button id="actPlay">▶︎  เล่น</button>
+    <button id="actRename">✎  เปลี่ยนชื่อ</button>
+    <button id="actDelete" class="del">✕  ลบออกจากคลัง</button>
+    <form id="renameForm" hidden>
+      <input id="renameInput" maxlength="60" autocomplete="off" aria-label="ชื่อเกม">
+      <button type="submit" class="save">บันทึกชื่อ</button>
+    </form>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<section id="player">
+  <button class="back" id="back">← คลังเกม</button>
+  <div id="game"></div>
+</section>
+
+<script>
+/* Where EmulatorJS + the mGBA core live. The build script swaps these for the web preview. */
+window.JV_DATA_PATH = "data/";
+window.JV_PATHS = null;
+</script>
+<script>
+(() => {
+  // ---------- storage (IndexedDB) ----------
+  const DB = "javis-gba", STORE = "roms";
+  let dbp;
+  function db() {
+    return dbp ||= new Promise((ok, bad) => {
+      const r = indexedDB.open(DB, 1);
+      r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: "id" });
+      r.onsuccess = () => ok(r.result);
+      r.onerror = () => bad(r.error);
+    });
+  }
+  async function tx(mode, fn) {
+    const d = await db();
+    return new Promise((ok, bad) => {
+      const t = d.transaction(STORE, mode), s = t.objectStore(STORE);
+      const req = fn(s);
+      t.oncomplete = () => ok(req && req.result);
+      t.onerror = () => bad(t.error);
+    });
+  }
+  const all = () => tx("readonly", s => s.getAll());
+  const get = id => tx("readonly", s => s.get(id));
+  const put = rec => tx("readwrite", s => s.put(rec));
+  const del = id => tx("readwrite", s => s.delete(id));
+
+  // ---------- helpers ----------
+  const $ = id => document.getElementById(id);
+  const hue = s => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+  const cleanName = f => f.replace(/\.[^.]+$/, "").replace(/[_]+/g, " ").replace(/\s*\(.*?\)|\s*\[.*?\]/g, "").trim() || f;
+  const size = b => b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.ceil(b / 1024) + " KB";
+  function ago(t) {
+    if (!t) return "ยังไม่เคยเล่น";
+    const m = Math.round((Date.now() - t) / 60000);
+    if (m < 1) return "เล่นเมื่อสักครู่";
+    if (m < 60) return `เล่นเมื่อ ${m} นาทีก่อน`;
+    if (m < 1440) return `เล่นเมื่อ ${Math.round(m / 60)} ชม. ก่อน`;
+    return `เล่นเมื่อ ${Math.round(m / 1440)} วันก่อน`;
+  }
+  function toast(msg) {
+    const t = $("toast"); t.textContent = msg; t.classList.add("on");
+    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), 2200);
+  }
+
+  // ---------- library ----------
+  async function render() {
+    const roms = (await all()).sort((a, b) => (b.lastPlayed || b.added) - (a.lastPlayed || a.added));
+    $("empty").hidden = roms.length > 0;
+    $("list").innerHTML = "";
+    for (const r of roms) {
+      const h = hue(r.name);
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `
+        <button class="cart" style="background:linear-gradient(140deg,hsl(${h} 55% 52%),hsl(${(h + 40) % 360} 50% 32%))"></button>
+        <div class="meta"><div class="name"></div><div class="sub"></div></div>
+        <button class="more" aria-label="ตัวเลือก">⋯</button>`;
+      card.querySelector(".cart").textContent = r.name.trim().charAt(0).toUpperCase() || "?";
+      card.querySelector(".name").textContent = r.name;
+      card.querySelector(".sub").textContent = `${ago(r.lastPlayed)} · ${size(r.size)}`;
+      card.querySelector(".cart").onclick = () => play(r.id);
+      card.querySelector(".meta").onclick = () => play(r.id);
+      card.querySelector(".more").onclick = () => openSheet(r);
+      $("list").appendChild(card);
+    }
+  }
+
+  $("add").onclick = () => $("file").click();
+  $("file").onchange = async e => {
+    const files = [...e.target.files];
+    for (const f of files) {
+      await put({
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        name: cleanName(f.name), file: f.name, size: f.size,
+        added: Date.now(), lastPlayed: 0,
+        data: new Blob([await f.arrayBuffer()])
+      });
+    }
+    e.target.value = "";
+    if (files.length) toast(`เพิ่ม ${files.length} เกมแล้ว`);
+    render();
+  };
+
+  let current = null;
+  function closeSheet() { $("scrim").classList.remove("on"); }
+  function openSheet(r) {
+    current = r;
+    $("sheetTitle").textContent = r.name;
+    $("renameForm").hidden = true;
+    $("actDelete").classList.remove("arm");
+    $("actDelete").textContent = "✕  ลบออกจากคลัง";
+    $("scrim").classList.add("on");
+  }
+  $("scrim").onclick = e => { if (e.target === $("scrim")) closeSheet(); };
+  $("actPlay").onclick = () => { closeSheet(); play(current.id); };
+  $("actRename").onclick = () => {
+    $("renameForm").hidden = false;
+    $("renameInput").value = current.name;
+    $("renameInput").focus();
+  };
+  $("renameForm").onsubmit = async e => {
+    e.preventDefault();
+    const n = $("renameInput").value.trim();
+    if (n) { current.name = n; await put(current); render(); toast("เปลี่ยนชื่อแล้ว"); }
+    closeSheet();
+  };
+  $("actDelete").onclick = async () => {
+    const b = $("actDelete");
+    if (!b.classList.contains("arm")) {            // first tap arms, second tap deletes
+      b.classList.add("arm"); b.textContent = "กดอีกครั้งเพื่อยืนยันการลบ (ไฟล์เซฟยังอยู่)"; return;
+    }
+    await del(current.id); closeSheet(); render(); toast("ลบแล้ว");
+  };
+
+  // ---------- settings (per device) ----------
+  const prefs = { touch: "auto", ab: "label" };
+  try { Object.assign(prefs, JSON.parse(localStorage.getItem("jv-prefs") || "{}")); } catch (e) {}
+  function savePrefs() { try { localStorage.setItem("jv-prefs", JSON.stringify(prefs)); } catch (e) {} }
+  function bindSeg(id, key) {
+    const el = $(id);
+    const paint = () => el.querySelectorAll("button").forEach(b => b.classList.toggle("sel", b.dataset.v === prefs[key]));
+    el.onclick = e => { const v = e.target.dataset && e.target.dataset.v; if (!v) return; prefs[key] = v; savePrefs(); paint(); applyTouch(); };
+    paint();
+  }
+  bindSeg("segTouch", "touch"); bindSeg("segAB", "ab");
+
+  // ---------- physical controller (GameSir etc.) ----------
+  let padConnected = false;
+  function padStatus() {
+    const pads = [...(navigator.getGamepads ? navigator.getGamepads() : [])].filter(Boolean);
+    padConnected = pads.length > 0;
+    $("padDot").classList.toggle("on", padConnected);
+    $("padName").textContent = padConnected ? "เชื่อมต่อแล้ว: " + pads[0].id.replace(/\s*\(.*?\)\s*/g, " ").trim().slice(0, 40) : "ยังไม่พบจอย";
+    $("padHint").textContent = padConnected ? "จอยบนจอจะซ่อนเองระหว่างเล่น" : "เปิด GameSir ในโหมด Android (M + A) แล้วกดปุ่มใดก็ได้";
+    applyTouch();
+  }
+  window.addEventListener("gamepadconnected", e => { padStatus(); toast("เชื่อมต่อจอยแล้ว"); });
+  window.addEventListener("gamepaddisconnected", () => { padStatus(); toast("จอยหลุดการเชื่อมต่อ"); });
+
+  function applyTouch() {
+    const emu = window.EJS_emulator;
+    if (!emu || !emu.toggleVirtualGamepad) return;
+    const show = prefs.touch === "show" || (prefs.touch === "auto" && !padConnected);
+    emu.toggleVirtualGamepad(show);
+    $("player").classList.toggle("padmode", !show);
+  }
+
+  // Controls: keyboard keys stay as EmulatorJS defaults; gamepad buttons follow the standard layout
+  // (BUTTON_1 = bottom/A, BUTTON_2 = right/B on GameSir in Android mode).
+  function controls() {
+    const swap = prefs.ab === "swap";
+    const p1 = {
+      0: { value: "x", value2: swap ? "BUTTON_1" : "BUTTON_2" },        // GBA B
+      8: { value: "z", value2: swap ? "BUTTON_2" : "BUTTON_1" },        // GBA A
+      1: { value: "s" }, 9: { value: "a" },
+      2: { value: "v", value2: "SELECT" }, 3: { value: "enter", value2: "START" },
+      4: { value: "up arrow", value2: "DPAD_UP" }, 5: { value: "down arrow", value2: "DPAD_DOWN" },
+      6: { value: "left arrow", value2: "DPAD_LEFT" }, 7: { value: "right arrow", value2: "DPAD_RIGHT" },
+      10: { value: "q", value2: "LEFT_TOP_SHOULDER" }, 11: { value: "e", value2: "RIGHT_TOP_SHOULDER" },
+      12: {}, 13: {}, 14: {}, 15: {}, 16: {}, 17: {}, 18: {}, 19: {}, 20: {}, 21: {}, 22: {}, 23: {},
+      24: { value: "1", value2: "LEFT_BOTTOM_SHOULDER" },             // quick save
+      25: { value: "2" }, 26: { value: "3" },
+      27: { value: "space", value2: "RIGHT_BOTTOM_SHOULDER" },        // hold to fast-forward
+      28: {}, 29: {}
+    };
+    return { 0: p1, 1: {}, 2: {}, 3: {} };
+  }
+
+  // Left stick works as the D-pad (GBA has no analog input)
+  const stickDirs = { 4: false, 5: false, 6: false, 7: false };
+  function pollStick() {
+    const emu = window.EJS_emulator, gm = emu && emu.gameManager;
+    const pad = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(Boolean);
+    if (gm && pad && pad.axes.length >= 2 && !document.hidden) {
+      const [x, y] = pad.axes, T = 0.5;
+      const want = { 4: y < -T, 5: y > T, 6: x < -T, 7: x > T };
+      for (const k in want) if (want[k] !== stickDirs[k]) { stickDirs[k] = want[k]; gm.simulateInput(0, +k, want[k] ? 1 : 0); }
+    }
+    requestAnimationFrame(pollStick);
+  }
+
+  // ---------- player ----------
+  async function play(id) {
+    const r = await get(id);
+    if (!r) return;
+    r.lastPlayed = Date.now(); await put(r);
+    history.pushState({ playing: id }, "");      // so Android's back button returns to the library
+    $("player").classList.add("on");
+    // no orientation lock: play in portrait (GameSir Pocket Taco) or landscape, follows the phone
+
+    const ext = (r.file.match(/\.[^.]+$/) || [".gba"])[0].toLowerCase();
+    window.EJS_player = "#game";
+    window.EJS_core = "gba";
+    window.EJS_gameName = "jv_" + r.id;            // stable save-file name, survives renames
+    window.EJS_gameUrl = new File([r.data], "game" + ext);
+    window.EJS_pathtodata = window.JV_DATA_PATH;
+    if (window.JV_PATHS) window.EJS_paths = window.JV_PATHS;
+    window.EJS_DEBUG_XX = true;                     // load the un-minified sources shipped in the package
+    window.EJS_startOnLoaded = true;
+    window.EJS_color = "#8c7cf0";
+    window.EJS_backgroundColor = "#000";
+    window.EJS_threads = false;
+    window.EJS_defaultOptions = { "save-state-location": "browser", "virtual-gamepad": "enabled" };
+    window.EJS_defaultControls = controls();
+    window.EJS_onGameStart = () => { padStatus(); requestAnimationFrame(pollStick); dimBack(); };
+    const s = document.createElement("script");
+    s.src = window.JV_DATA_PATH + "loader.js";
+    document.body.appendChild(s);
+  }
+
+  function flushSave() {
+    try { window.EJS_emulator && window.EJS_emulator.gameManager && window.EJS_emulator.gameManager.saveSaveFiles(); } catch (e) {}
+  }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) flushSave(); });
+  function leave() {
+    flushSave();
+    setTimeout(() => location.replace(location.pathname), 400);   // reload tears the emulator down cleanly
+  }
+  $("back").onclick = () => history.back();
+  // the back pill fades after a few seconds and wakes on touch
+  let dimT;
+  function dimBack() { $("back").classList.remove("dim"); clearTimeout(dimT); dimT = setTimeout(() => $("back").classList.add("dim"), 3000); }
+  $("player").addEventListener("pointerdown", dimBack);
+  window.addEventListener("popstate", () => { if ($("player").classList.contains("on")) leave(); });
+
+  padStatus();
+  render();
+})();
+</script>
+</body>
+</html>

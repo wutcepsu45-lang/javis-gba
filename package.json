@@ -1,0 +1,18 @@
+{
+  "name": "javis-gba",
+  "version": "1.0.0",
+  "description": "Javis GBA — Android GBA emulator (mGBA core via EmulatorJS)",
+  "scripts": {
+    "build": "./build.sh",
+    "sync": "./build.sh && npx cap sync android",
+    "open": "npx cap open android"
+  },
+  "license": "GPL-3.0",
+  "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/cli": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
+    "@emulatorjs/core-mgba": "^4.2.3",
+    "@emulatorjs/emulatorjs": "^4.2.3"
+  }
+}

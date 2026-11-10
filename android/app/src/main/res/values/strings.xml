@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Javis GBA</string>
+    <string name="title_activity_main">Javis GBA</string>
+    <string name="package_name">com.javis.gba</string>
+    <string name="custom_url_scheme">com.javis.gba</string>
+</resources>
