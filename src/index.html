@@ -123,7 +123,7 @@ header p{margin:4px 0 0;color:var(--muted);font-size:13px}
 </main>
 
 <button class="fab" id="add"><span>+</span>เพิ่มเกม</button>
-<input type="file" id="file" accept=".gba,.zip,.7z,.agb,.bin" multiple hidden>
+<input type="file" id="file" accept="*/*" multiple hidden>
 
 <div class="scrim" id="scrim">
   <div class="sheet">
@@ -218,18 +218,35 @@ window.JV_PATHS = null;
   }
 
   $("add").onclick = () => $("file").click();
+  // Android does not know a MIME type for .gba, so the picker shows every file
+  // and the app checks the content itself.
+  const OK_EXT = [".gba", ".agb", ".bin", ".zip", ".7z"];
+  function romKind(name, head) {
+    const ext = ((name || "").match(/\.[^.]+$/) || [""])[0].toLowerCase();
+    if (head.length > 0xB2 && head[0xB2] === 0x96) return ext === ".agb" || ext === ".bin" ? ext : ".gba"; // GBA header
+    if (head[0] === 0x50 && head[1] === 0x4B) return ".zip";
+    if (head[0] === 0x37 && head[1] === 0x7A) return ".7z";
+    return OK_EXT.includes(ext) ? ext : null;
+  }
   $("file").onchange = async e => {
     const files = [...e.target.files];
+    let added = 0, skipped = [];
     for (const f of files) {
+      const buf = await f.arrayBuffer();
+      const kind = romKind(f.name, new Uint8Array(buf, 0, Math.min(buf.byteLength, 0xC0)));
+      if (!kind) { skipped.push(f.name || "ไฟล์"); continue; }
+      const base = (f.name || "game").replace(/\.[^.]+$/, "");
       await put({
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        name: cleanName(f.name), file: f.name, size: f.size,
+        name: cleanName(base + kind), file: base + kind, size: f.size,
         added: Date.now(), lastPlayed: 0,
-        data: new Blob([await f.arrayBuffer()])
+        data: new Blob([buf])
       });
+      added++;
     }
     e.target.value = "";
-    if (files.length) toast(`เพิ่ม ${files.length} เกมแล้ว`);
+    if (added) toast(`เพิ่ม ${added} เกมแล้ว`);
+    if (skipped.length) toast(`ข้าม ${skipped.length} ไฟล์ที่ไม่ใช่เกม GBA`);
     render();
   };
 
