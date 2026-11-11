@@ -156,11 +156,12 @@ window.JV_PATHS = null;
   let dbp;
   function db() {
     return dbp ||= new Promise((ok, bad) => {
-      const r = indexedDB.open(DB, 2);
+      const r = indexedDB.open(DB, 3);
       r.onupgradeneeded = () => {
         const d = r.result;
         if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE, { keyPath: "id" });
         if (!d.objectStoreNames.contains("states")) d.createObjectStore("states");   // key: "<gameId>#<slot>"
+        if (!d.objectStoreNames.contains("saves")) d.createObjectStore("saves");     // key: gameId -> in-game save backup
       };
       r.onsuccess = () => ok(r.result);
       r.onerror = () => bad(r.error);
@@ -403,7 +404,7 @@ window.JV_PATHS = null;
     window.EJS_player = "#game";
     window.EJS_core = "gba";
     window.EJS_gameName = "jv_" + r.id;            // stable save-file name, survives renames
-    window.EJS_gameUrl = new File([r.data], "game" + ext);
+    window.EJS_gameUrl = new File([r.data], "jv_" + r.id + ext);   // own file name per game = own save file
     window.EJS_pathtodata = window.JV_DATA_PATH;
     if (window.JV_PATHS) window.EJS_paths = window.JV_PATHS;
     window.EJS_DEBUG_XX = true;                     // load the un-minified sources shipped in the package
@@ -415,19 +416,73 @@ window.JV_PATHS = null;
     window.EJS_defaultControls = controls();
     playingId = r.id;
     window.EJS_ready = () => {
+      window.EJS_emulator.on("saveSaveFiles", data => backupSave(data));
       // take over the menu's Save State / Load State buttons
       window.EJS_emulator.on("saveState", () => saveState());
       window.EJS_emulator.on("loadState", () => loadState());
     };
-    window.EJS_onGameStart = () => { padStatus(); requestAnimationFrame(pollStick); dimBack(); };
+    window.EJS_onGameStart = () => { padStatus(); requestAnimationFrame(pollStick); dimBack(); restoreSave(); };
     const s = document.createElement("script");
     s.src = window.JV_DATA_PATH + "loader.js";
     document.body.appendChild(s);
   }
 
+  // ---------- in-game save (SRAM/Flash) ----------
+  // The emulator keeps the save file in its own storage and only writes it every few minutes.
+  // We write it every 5 s and keep a copy in the app's database, so closing the app never loses it.
+  async function savesDB(mode, fn) {
+    const d = await db();
+    return new Promise((ok, bad) => {
+      const t = d.transaction("saves", mode), st = t.objectStore("saves"), req = fn(st);
+      t.oncomplete = () => ok(req && req.result); t.onerror = () => bad(t.error);
+    });
+  }
+  let lastSig = "";
+  function isBlank(u8) { if (!u8 || !u8.length) return true; const f = u8[0]; if (f !== 0 && f !== 0xFF) return false; for (let i = 1; i < u8.length; i++) if (u8[i] !== f) return false; return true; }
+  function sig(u8) { let h = 0; for (let i = 0; i < u8.length; i += 7) h = (h * 31 + u8[i]) | 0; return u8.length + ":" + h; }
+  async function backupSave(data) {
+    if (!playingId || !data || isBlank(data)) return;   // never let an empty file overwrite a real backup
+    const s2 = sig(data);
+    if (s2 === lastSig) return;
+    lastSig = s2;
+    try { await savesDB("readwrite", st => st.put({ data: new Uint8Array(data), at: Date.now() }, playingId)); } catch (e) {}
+  }
+  async function restoreSave() {
+    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    try {
+      const path = gm.getSaveFilePath();
+      const FS = gm.FS;
+      // the core creates an empty save file at boot, so "exists" is not enough: treat a blank file as missing
+      if (FS.analyzePath(path).exists) {
+        const cur = FS.readFile(path);
+        if (!isBlank(cur)) { lastSig = sig(cur); return; }
+      }
+      // save from the app's copy, or from the old shared name used by the first versions ("game.srm")
+      let data = null;
+      const rec = await savesDB("readonly", st => st.get(playingId));
+      if (rec) data = rec.data;
+      if (!data) {
+        const legacy = path.replace(/[^/]*(\.[^./]+)$/, "game$1");
+        if (legacy !== path && FS.analyzePath(legacy).exists) data = FS.readFile(legacy);
+        if (data && isBlank(data)) data = null;
+      }
+      if (!data) return;
+      const dir = path.slice(0, path.lastIndexOf("/"));
+      try { FS.mkdirTree ? FS.mkdirTree(dir) : FS.mkdir(dir); } catch (e) {}
+      FS.writeFile(path, data);
+      lastSig = sig(data);
+      gm.loadSaveFiles();
+      gm.restart();
+      say("โหลดเซฟในเกมกลับมาแล้ว — เลือก Continue ได้เลย");
+    } catch (e) { console.warn("restoreSave", e); }
+  }
   function flushSave() {
     try { window.EJS_emulator && window.EJS_emulator.gameManager && window.EJS_emulator.gameManager.saveSaveFiles(); } catch (e) {}
   }
+  setInterval(() => { if (playingId && window.EJS_emulator && window.EJS_emulator.started && !document.hidden) flushSave(); }, 5000);
+  window.addEventListener("pagehide", flushSave);
+  document.addEventListener("freeze", flushSave);
   document.addEventListener("visibilitychange", () => { if (document.hidden) flushSave(); });
   function leave() {
     flushSave();
