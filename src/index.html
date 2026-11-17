@@ -130,6 +130,7 @@ header p{margin:4px 0 0;color:var(--muted);font-size:13px}
     <h3 id="sheetTitle"></h3>
     <button id="actPlay">▶︎  เล่น</button>
     <button id="actRename">✎  เปลี่ยนชื่อ</button>
+    <button id="actRecover">⟲  กู้เซฟเก่า (เซฟที่หายหลังลบเกม)</button>
     <button id="actDelete" class="del">✕  ลบออกจากคลัง</button>
     <form id="renameForm" hidden>
       <input id="renameInput" maxlength="60" autocomplete="off" aria-label="ชื่อเกม">
@@ -233,6 +234,13 @@ window.JV_PATHS = null;
     if (head[0] === 0x37 && head[1] === 0x7A) return ".7z";
     return OK_EXT.includes(ext) ? ext : null;
   }
+  function hex(buf) { return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join(""); }
+  async function romId(buf) {
+    try { if (crypto && crypto.subtle) return "g" + hex(await crypto.subtle.digest("SHA-1", buf)).slice(0, 16); } catch (e) {}
+    const u = new Uint8Array(buf); let a = 0x811c9dc5, b = 0x9747b28c;   // fallback: two FNV-1a passes
+    for (let i = 0; i < u.length; i++) { a = Math.imul(a ^ u[i], 16777619); b = Math.imul(b ^ u[u.length - 1 - i], 16777619); }
+    return "g" + (a >>> 0).toString(16).padStart(8, "0") + (b >>> 0).toString(16).padStart(8, "0");
+  }
   $("file").onchange = async e => {
     const files = [...e.target.files];
     let added = 0, skipped = [];
@@ -241,8 +249,13 @@ window.JV_PATHS = null;
       const kind = romKind(f.name, new Uint8Array(buf, 0, Math.min(buf.byteLength, 0xC0)));
       if (!kind) { skipped.push(f.name || "ไฟล์"); continue; }
       const base = (f.name || "game").replace(/\.[^.]+$/, "");
+      // the id comes from the file's content, so removing a game and adding it again
+      // brings back the same id — and with it the same in-game save and Save States
+      const id = await romId(buf);
+      const old = await get(id);
+      if (old) { added++; continue; }              // already in the library
       await put({
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        id,
         name: cleanName(base + kind), file: base + kind, size: f.size,
         added: Date.now(), lastPlayed: 0,
         data: new Blob([buf])
@@ -250,7 +263,7 @@ window.JV_PATHS = null;
       added++;
     }
     e.target.value = "";
-    if (added) toast(`เพิ่ม ${added} เกมแล้ว`);
+    if (added) toast(`เพิ่ม ${added} เกมแล้ว (เซฟเดิมของเกมนี้จะกลับมาเอง)`);
     if (skipped.length) toast(`ข้าม ${skipped.length} ไฟล์ที่ไม่ใช่เกม GBA`);
     render();
   };
@@ -267,6 +280,7 @@ window.JV_PATHS = null;
   }
   $("scrim").onclick = e => { if (e.target === $("scrim")) closeSheet(); };
   $("actPlay").onclick = () => { closeSheet(); play(current.id); };
+  $("actRecover").onclick = () => { closeSheet(); recoverMode = true; play(current.id); };
   $("actRename").onclick = () => {
     $("renameForm").hidden = false;
     $("renameInput").value = current.name;
@@ -340,7 +354,7 @@ window.JV_PATHS = null;
   }
 
   // ---------- Save State: kept in the app's own storage, one per slot ----------
-  let playingId = null;
+  let playingId = null, playingCode = "", recoverMode = false;
   async function stateDB(mode, fn) {
     const d = await db();
     return new Promise((ok, bad) => {
@@ -415,6 +429,10 @@ window.JV_PATHS = null;
     window.EJS_defaultOptions = { "save-state-location": "browser", "virtual-gamepad": "enabled" };
     window.EJS_defaultControls = controls();
     playingId = r.id;
+    try {   // header title + game code (e.g. "POKEMON EMERBPEE"): tags saves so a lost link can be found again
+      const h = new Uint8Array(await r.data.slice(0xA0, 0xB0).arrayBuffer());
+      playingCode = String.fromCharCode(...h).replace(/[^\x20-\x7e]/g, "").trim();
+    } catch (e) { playingCode = ""; }
     window.EJS_ready = () => {
       window.EJS_emulator.on("saveSaveFiles", data => backupSave(data));
       // take over the menu's Save State / Load State buttons
@@ -445,7 +463,54 @@ window.JV_PATHS = null;
     const s2 = sig(data);
     if (s2 === lastSig) return;
     lastSig = s2;
-    try { await savesDB("readwrite", st => st.put({ data: new Uint8Array(data), at: Date.now() }, playingId)); } catch (e) {}
+    try { await savesDB("readwrite", st => st.put({ data: new Uint8Array(data), at: Date.now(), code: playingCode }, playingId)); } catch (e) {}
+  }
+  // saves whose game is no longer in the library (removed, or added again under another id)
+  async function orphanSaves(path, FS) {
+    const ids = new Set((await all()).map(r => r.id));
+    const out = [];
+    const keys = await savesDB("readonly", st => st.getAllKeys());
+    for (const k of keys || []) {
+      if (ids.has(k)) continue;
+      const rec = await savesDB("readonly", st => st.get(k));
+      if (rec && rec.data && !isBlank(rec.data)) out.push({ id: k, data: rec.data, at: rec.at || 0, code: rec.code || "" });
+    }
+    try {   // the emulator's own copies: <dir>/jv_<id>.<ext>
+      const dir = path.slice(0, path.lastIndexOf("/"));
+      for (const n of FS.readdir(dir)) {
+        const m = n.match(/^jv_(.+)\.[^.]+$/);
+        if (!m || ids.has(m[1]) || out.some(o => o.id === m[1])) continue;
+        const d = FS.readFile(dir + "/" + n);
+        if (!isBlank(d)) out.push({ id: m[1], data: d, at: +FS.stat(dir + "/" + n).mtime || 0, code: "" });
+      }
+    } catch (e) {}
+    return out.sort((a, b) => b.at - a.at);
+  }
+  function askOrphan(o) {
+    return new Promise(ok => {
+      const mins = Math.round((Date.now() - o.at) / 60000);
+      const when = !o.at ? "" : mins < 60 ? mins + " นาทีก่อน" : mins < 1440 ? Math.round(mins / 60) + " ชม. ก่อน" : Math.round(mins / 1440) + " วันก่อน";
+      const box = document.createElement("div");
+      box.style.cssText = "position:fixed;inset:0;z-index:99999;background:#000a;display:flex;align-items:center;justify-content:center;padding:16px";
+      box.innerHTML = `<div style="background:#1d1a2b;color:#ece8f6;border-radius:18px;padding:20px;max-width:340px;font:15px/1.5 system-ui">
+        <b style="font-size:17px">พบเซฟเก่าที่ไม่ได้ผูกกับเกม</b>
+        <p style="margin:8px 0 16px;color:#b9b2d0">${o.code ? "เกม " + o.code.replace(/[<>&]/g, "") + " · " : ""}บันทึกเมื่อ ${when || "ไม่ทราบเวลา"}<br>นำเซฟนี้มาใช้กับเกมที่เปิดอยู่ไหม?</p>
+        <div style="display:flex;gap:10px"><button data-a="0" style="flex:1;padding:12px;border:0;border-radius:12px;background:#2b2740;color:#ece8f6;font:inherit">ไม่ใช้</button>
+        <button data-a="1" style="flex:1;padding:12px;border:0;border-radius:12px;background:#8c7cf0;color:#fff;font:inherit;font-weight:600">ใช้เซฟนี้</button></div></div>`;
+      box.onclick = e => { const a = e.target.dataset && e.target.dataset.a; if (a == null) return; box.remove(); ok(a === "1"); };
+      document.body.appendChild(box);
+    });
+  }
+  async function adoptOrphan(o) {   // move the save and its Save States over to the current game
+    await savesDB("readwrite", st => { st.put({ data: new Uint8Array(o.data), at: o.at || Date.now(), code: playingCode }, playingId); return st.delete(o.id); });
+    try {
+      const keys = await stateDB("readonly", st => st.getAllKeys());
+      for (const k of keys || []) {
+        if (!String(k).startsWith(o.id + "#")) continue;
+        const rec = await stateDB("readonly", st => st.get(k));
+        await stateDB("readwrite", st => { st.put(rec, playingId + k.slice(o.id.length)); return st.delete(k); });
+      }
+    } catch (e) {}
   }
   async function restoreSave() {
     const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
@@ -453,6 +518,19 @@ window.JV_PATHS = null;
     try {
       const path = gm.getSaveFilePath();
       const FS = gm.FS;
+      if (recoverMode) {   // "กู้เซฟเก่า": offer every save left without a game, newest first
+        recoverMode = false;
+        const orphans = await orphanSaves(path, FS);
+        if (!orphans.length) { say("ไม่พบเซฟเก่าที่หลุดจากเกม"); return; }
+        for (const o of orphans) {
+          if (!await askOrphan(o)) continue;
+          const cur = await savesDB("readonly", st => st.get(playingId));   // keep the current save as an old save
+          if (cur && cur.data && !isBlank(cur.data)) await savesDB("readwrite", st => st.put(cur, playingId + "-ก่อนกู้-" + Date.now().toString(36)));
+          await adoptOrphan(o);
+          return writeSave(gm, FS, path, o.data);
+        }
+        return;
+      }
       // the core creates an empty save file at boot, so "exists" is not enough: treat a blank file as missing
       if (FS.analyzePath(path).exists) {
         const cur = FS.readFile(path);
@@ -467,15 +545,24 @@ window.JV_PATHS = null;
         if (legacy !== path && FS.analyzePath(legacy).exists) data = FS.readFile(legacy);
         if (data && isBlank(data)) data = null;
       }
+      if (!data) {   // a save left behind when the game was removed and added again
+        const orphans = await orphanSaves(path, FS);
+        const sure = playingCode && orphans.find(o => o.code === playingCode);
+        const o = sure || orphans.find(o => !o.code || !playingCode);
+        if (o && (sure || await askOrphan(o))) { await adoptOrphan(o); data = o.data; }
+      }
       if (!data) return;
-      const dir = path.slice(0, path.lastIndexOf("/"));
-      try { FS.mkdirTree ? FS.mkdirTree(dir) : FS.mkdir(dir); } catch (e) {}
-      FS.writeFile(path, data);
-      lastSig = sig(data);
-      gm.loadSaveFiles();
-      gm.restart();
-      say("โหลดเซฟในเกมกลับมาแล้ว — เลือก Continue ได้เลย");
+      writeSave(gm, FS, path, data);
     } catch (e) { console.warn("restoreSave", e); }
+  }
+  function writeSave(gm, FS, path, data) {
+    const dir = path.slice(0, path.lastIndexOf("/"));
+    try { FS.mkdirTree ? FS.mkdirTree(dir) : FS.mkdir(dir); } catch (e) {}
+    FS.writeFile(path, data);
+    lastSig = sig(data);
+    gm.loadSaveFiles();
+    gm.restart();
+    say("โหลดเซฟในเกมกลับมาแล้ว — เลือก Continue ได้เลย");
   }
   function flushSave() {
     try { window.EJS_emulator && window.EJS_emulator.gameManager && window.EJS_emulator.gameManager.saveSaveFiles(); } catch (e) {}
