@@ -4,10 +4,10 @@ android {
     namespace = "com.javis.gba"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.javis.gba"
+        applicationId "com.javis.gba.app"   // new id: the first builds were signed with throw-away keys
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
+        versionCode((System.getenv("GITHUB_RUN_NUMBER") ?: "1") as Integer)
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
@@ -16,8 +16,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    // one fixed key, so every new APK installs over the previous one and keeps the app's data
+    signingConfigs {
+        javis {
+            storeFile file("javis.jks")
+            storePassword "javisgba"
+            keyAlias "javis"
+            keyPassword "javisgba"
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.javis
+        }
         release {
+            signingConfig signingConfigs.javis
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

@@ -1,6 +1,6 @@
 {
-  "appId": "com.javis.gba",
-  "appName": "Javis GBA",
+  "appId": "com.javis.gba.app",
+  "appName": "JV GBA",
   "webDir": "www",
   "android": { "backgroundColor": "#14121c" }
 }
