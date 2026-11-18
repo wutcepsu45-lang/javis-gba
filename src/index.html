@@ -145,6 +145,7 @@ header p{margin:4px 0 0;color:var(--muted);font-size:13px}
   <div id="game"></div>
 </section>
 
+<script src="bot.js"></script>
 <script>
 /* Where EmulatorJS + the mGBA core live. The build script swaps these for the web preview. */
 window.JV_DATA_PATH = "data/";
@@ -439,7 +440,7 @@ window.JV_PATHS = null;
       window.EJS_emulator.on("saveState", () => saveState());
       window.EJS_emulator.on("loadState", () => loadState());
     };
-    window.EJS_onGameStart = () => { padStatus(); requestAnimationFrame(pollStick); dimBack(); restoreSave(); };
+    window.EJS_onGameStart = () => { padStatus(); requestAnimationFrame(pollStick); dimBack(); restoreSave(); if (window.JVBot) JVBot.init(window.JV_DATA_PATH); };
     const s = document.createElement("script");
     s.src = window.JV_DATA_PATH + "loader.js";
     document.body.appendChild(s);
@@ -572,6 +573,7 @@ window.JV_PATHS = null;
   document.addEventListener("freeze", flushSave);
   document.addEventListener("visibilitychange", () => { if (document.hidden) flushSave(); });
   function leave() {
+    if (window.JVBot) JVBot.stop();
     flushSave();
     setTimeout(() => location.replace(location.pathname), 400);   // reload tears the emulator down cleanly
   }
