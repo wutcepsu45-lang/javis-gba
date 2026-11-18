@@ -33,8 +33,8 @@
       has: !!(flags & 2), egg: !!(flags & 4), pid,
       moves: [w3 & 0x7FF, (w3 >>> 16) & 0x7FF, w4 & 0x7FF, (w4 >>> 11) & 0x7FF],
       pp: [w5 & 0x7F, (w5 >>> 8) & 0x7F, (w5 >>> 16) & 0x7F, (w5 >>> 24) & 0x7F],
-      // shiny odds are 1/128 or 1/256 depending on a game setting: count either as shiny so none is missed
-      shiny: !!(((sv < 256) ? 1 : 0) ^ mod) || !!(((sv < 512) ? 1 : 0) ^ mod),
+      // same test as GetMonData(MON_DATA_IS_SHINY) with the release odds (256/65536) this ROM uses
+      shiny: !!(((sv < 256) ? 1 : 0) ^ mod),
     };
   }
   const valid = m => m.has && !m.egg && m.species > 0 && m.species < 1600 && m.level >= 1 && m.level <= 100 && m.maxHP > 0 && m.hp <= m.maxHP;
@@ -74,7 +74,7 @@
 
   // ---------- settings ----------
   const PREF = "jv-bot";
-  const cfg = Object.assign({ mode: "grind", dir: "LR", steps: 2, slot: 0, hpStop: 35, lvStop: 0, targets: "", fast: true, stopLearn: true },
+  const cfg = Object.assign({ dest: "", navFight: false, mode: "grind", dir: "LR", steps: 2, slot: 0, hpStop: 35, lvStop: 0, targets: "", fast: true, stopLearn: true },
     (() => { try { return JSON.parse(localStorage.getItem(PREF)) || {}; } catch (e) { return {}; } })());
   const saveCfg = () => { try { localStorage.setItem(PREF, JSON.stringify(cfg)); } catch (e) {} };
   const nameOf = id => SPECIES[id] || ("#" + id);
@@ -86,11 +86,153 @@
     return ids;
   }
 
+  // ---------- player position and NPCs (navigation) ----------
+  const SB1PTR = 0x030040C4, OBJ0 = 0x02003314, OBJSZ = 0x24;
+  const s16 = a => dv.getInt16(at(a), true);
+  function where() {
+    const sb = u32(SB1PTR);
+    if (sb < 0x02000000 || sb >= 0x02040000) return null;
+    const o = OBJ0;   // object 0 is the player (localId 255); its coordinates update as a step starts
+    const okObj = u8(o + 8) === 255 && (u32(o) & 1);
+    return { g: u8(sb + 4), m: u8(sb + 5), x: okObj ? s16(o + 0x10) - 7 : s16(sb), y: okObj ? s16(o + 0x12) - 7 : s16(sb + 2), z: okObj ? (u8(o + 0x0B) & 15) : 0 };
+  }
+  function npcs() {
+    const r = [];
+    for (let i = 0; i < 16; i++) {
+      const o = OBJ0 + i * OBJSZ, id = u8(o + 8);
+      if (!(u32(o) & 1) || id === 255 || id === 254) continue;   // inactive, player, follower
+      r.push([s16(o + 0x10) - 7, s16(o + 0x12) - 7]);
+    }
+    return r;
+  }
+
+  // ---------- map data + path finding ----------
+  let MAPS = null, MAPIDX = null, mapsLoading = null, BASE = "";
+  const T_WALK = 0, T_WALL = 1, T_WATER = 2, T_JS = 3, T_JN = 4, T_JE = 5, T_JW = 6, T_ICE = 12;
+  function loadMaps() {
+    if (MAPS) return Promise.resolve(MAPS);
+    if (!mapsLoading) mapsLoading = fetch(BASE + "maps.json").then(r => r.json()).then(j => {
+      MAPIDX = {};
+      j.forEach((m, i) => { if (!m) return; MAPIDX[m.g * 256 + m.m] = i; m.tiles = Uint8Array.from(atob(m.t), c => c.charCodeAt(0)); delete m.t; m.oset = new Set(m.o.map(([x, y]) => x * 1024 + y)); });
+      MAPS = j; return j;
+    });
+    return mapsLoading;
+  }
+  const DIRS = { U: [0, -1], D: [0, 1], L: [-1, 0], R: [1, 0] };
+  const pretty = n => n.replace(/_/g, " · ").replace(/([a-z])([A-Z0-9])/g, "$1 $2").replace(/Pokemon/g, "Pokémon").replace(/ 1 F/g, " 1F");
+  function arrival(mi, wi) {
+    const m = MAPS[mi]; if (!m || !m.wp[wi]) return null;
+    let [x, y] = m.wp[wi];
+    const t = m.tiles[y * m.w + x];
+    if (t === undefined || (t & 15) === T_WALL) y += 1;        // a door: you come out one step below it
+    return [mi, x, y, 0];
+  }
+  // breadth-first search over (map, x, y, elevation), crossing map edges and warps
+  function findPath(from, goal, blocked, useStatic = true) {
+    const key = (mi, x, y, z) => ((mi * 256 + (y & 255)) * 256 + (x & 255)) * 16 + z;
+    const start = [MAPIDX[from.g * 256 + from.m], from.x, from.y, from.z];
+    if (start[0] === undefined) return null;
+    const live = new Set(npcs().map(([x, y]) => start[0] + ":" + x + ":" + y));
+    const prev = new Map([[key(...start), null]]);
+    let q = [start], n = 0;
+    while (q.length) {
+      const nq = [];
+      for (const s of q) {
+        const [mi, x, y, z] = s, m = MAPS[mi];
+        if (goal(mi)) {
+          const path = []; let k = key(...s), cur = s;
+          while (cur) { const p = prev.get(k); path.push({ s: cur, d: p && p.d, how: p && p.how }); if (!p) break; cur = p.s; k = key(...cur); }
+          return path.reverse();
+        }
+        if (++n > 400000) return null;
+        const wpHere = m.wp.findIndex(w => w[0] === x && w[1] === y);
+        for (const d of ["U", "D", "L", "R"]) {
+          let nx = x + DIRS[d][0], ny = y + DIRS[d][1], next = null, how = "walk";
+          // standing on a mat / stair warp and pressing its direction
+          if (wpHere >= 0 && m.wp[wpHere][4] === "a" + d && m.wp[wpHere][2] >= 0) { next = arrival(m.wp[wpHere][2], m.wp[wpHere][3]); how = "warp"; }
+          else if (nx < 0 || ny < 0 || nx >= m.w || ny >= m.h) {
+            const c = m.c.find(c => c[0] === { U: "u", D: "d", L: "l", R: "r" }[d]);
+            if (!c || !MAPS[c[2]]) continue;
+            const t = MAPS[c[2]];
+            const tx = d === "R" ? 0 : d === "L" ? t.w - 1 : x - c[1];
+            const ty = d === "D" ? 0 : d === "U" ? t.h - 1 : y - c[1];
+            if (tx < 0 || ty < 0 || tx >= t.w || ty >= t.h) continue;
+            const tc = t.tiles[ty * t.w + tx] & 15;
+            if (tc === T_WALL || tc === T_WATER) continue;
+            next = [c[2], tx, ty, z]; how = "edge";
+          } else {
+            const w = m.wp.find(w => w[0] === nx && w[1] === ny);
+            const tile = m.tiles[ny * m.w + nx], tc = tile & 15, el = tile >> 4;
+            if (w && w[4] === "d" && w[2] >= 0) { next = arrival(w[2], w[3]); how = "warp"; }
+            else {
+              if (blocked.has(mi + ":" + nx + ":" + ny) || (mi === start[0] && live.has(mi + ":" + nx + ":" + ny))) continue;
+              // people, trees and rocks from the map data; near the player the live object list is used instead
+              if (useStatic && m.oset.has(nx * 1024 + ny) && !(mi === start[0] && Math.abs(nx - from.x) <= 8 && Math.abs(ny - from.y) <= 6)) continue;
+              if (tc === T_WALL || tc === T_WATER) continue;
+              if (tc >= T_JS && tc <= T_JW) {               // ledges: only jump down them
+                if ({ [T_JS]: "D", [T_JN]: "U", [T_JE]: "R", [T_JW]: "L" }[tc] !== d) continue;
+                nx += DIRS[d][0]; ny += DIRS[d][1];
+                if (nx < 0 || ny < 0 || nx >= m.w || ny >= m.h || (m.tiles[ny * m.w + nx] & 15) === T_WALL) continue;
+                next = [mi, nx, ny, z]; how = "jump";
+              } else {
+                if (z && el && el !== 15 && el !== z) continue;   // different floor level (bridges)
+                if (w && w[4] === "s" && w[2] >= 0) { next = arrival(w[2], w[3]); how = "warp"; }
+                else next = [mi, nx, ny, el === 15 ? z : el];
+              }
+            }
+          }
+          if (!next) continue;
+          const k = key(...next);
+          if (prev.has(k)) continue;
+          prev.set(k, { s, d, how });
+          nq.push(next);
+        }
+      }
+      q = nq;
+    }
+    return null;
+  }
+
+  // ---------- battles (shared by every mode) ----------
+  // returns a stop message, or null to carry on
+  async function battleTick(battle, fight) {
+    if (Date.now() - battle.t > 120000) return "อยู่ในการต่อสู้นานผิดปกติ (อาจมีหน้าต่างให้เลือก) — บอทหยุด";
+    if (!fight) {
+      // from any cursor position, Down then Right lands on "Run" (bottom-right); A also advances text
+      await tap("D"); await tap("R"); await tap("A"); await waitF(10);
+      return null;
+    }
+    const l = lead();
+    if (l) {
+      if (l.hp * 100 < l.maxHP * cfg.hpStop) return `HP ของ ${nameOf(l.species)} เหลือ ${l.hp}/${l.maxHP} — บอทหยุดกลางการต่อสู้`;
+      if (!l.moves[cfg.slot] || l.pp[cfg.slot] === 0) return `ท่า ${moveName(l.moves[cfg.slot])} PP หมด — เปลี่ยนท่าหรือไปรักษา`;
+      if (cfg.stopLearn && l.level > battle.lv && l.moves.every(Boolean)) return `${nameOf(l.species)} เลเวลอัปเป็น ${l.level} — ถ้ามีท่าใหม่ให้เลือกเอง แล้วกดเริ่มบอทอีกครั้ง`;
+    }
+    // FIGHT (top-left), then the move: slot 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right
+    await tap("U"); await tap("L"); await tap("A"); await waitF(8);
+    await tap("U"); await tap("L");
+    if (cfg.slot & 1) await tap("R");
+    if (cfg.slot & 2) await tap("D");
+    await tap("A"); await waitF(12);
+    return null;
+  }
+  async function battleStart(battle, targets) {
+    stats.enc++;
+    await waitF(30); snap();
+    const e = enemy();
+    stats.last = valid(e) ? `${nameOf(e.species)} Lv.${e.level}${e.shiny ? " ✨" : ""}` : "?";
+    status();
+    if (valid(e) && e.shiny) return { msg: `✨ เจอ ${nameOf(e.species)} SHINY! บอทหยุดแล้ว — จับเองเลย`, alert: true };
+    if (cfg.mode === "hunt" && valid(e) && targets.has(e.species)) return { msg: `เจอ ${nameOf(e.species)} Lv.${e.level} แล้ว — บอทหยุด จับเองได้เลย`, alert: true };
+    return null;
+  }
+
   // ---------- the loop ----------
   let running = false, stats = { enc: 0, wins: 0, runs: 0, started: 0, last: "" };
   async function run() {
     const err = locate();
     if (err) { stop(err, true); return; }
+    if (cfg.mode === "nav") return runNav();
     stats = { enc: 0, wins: 0, runs: 0, started: Date.now(), last: "" };
     const targets = targetIds();
     if (cfg.fast) { try { gm().Module._set_ff_ratio(3); gm().Module._toggle_fastforward(1); } catch (e) {} }
@@ -104,7 +246,7 @@
           const l = lead();
           if (cfg.mode === "grind" && cfg.lvStop && l && l.level >= cfg.lvStop) { stop(`${nameOf(l.species)} ถึงเลเวล ${l.level} แล้ว`); break; }
           if (cfg.mode === "grind" && l && l.hp * 100 < l.maxHP * cfg.hpStop) { stop(`HP ของ ${nameOf(l.species)} เหลือ ${l.hp}/${l.maxHP} — พาไปรักษาก่อน`); break; }
-          await tap("B"); await tap("B");                // close leftover text (evolution etc. need A, see below)
+          await tap("B"); await tap("B");
         }
         if (Date.now() - lastEnc > 180000) { stop("3 นาทีแล้วยังไม่เจอโปเกมอน — ตรวจว่ายืนอยู่ในพงหญ้า"); break; }
         // walk back and forth inside the grass
@@ -114,34 +256,104 @@
         await tap("B", 2, 2);
         continue;
       }
-      // ---- in battle ----
       if (!battle) {
         battle = { t: Date.now(), lv: (lead() || {}).level || 0 };
-        lastEnc = Date.now(); stats.enc++;
-        await waitF(30); snap();
-        const e = enemy();
-        stats.last = valid(e) ? `${nameOf(e.species)} Lv.${e.level}${e.shiny ? " ✨" : ""}` : "?";
-        status();
-        if (valid(e) && e.shiny) { stop(`✨ เจอ ${nameOf(e.species)} SHINY! บอทหยุดแล้ว — จับเองเลย`, false, true); break; }
-        if (cfg.mode === "hunt" && valid(e) && targets.has(e.species)) { stop(`เจอ ${nameOf(e.species)} Lv.${e.level} แล้ว — บอทหยุด จับเองได้เลย`, false, true); break; }
+        lastEnc = Date.now();
+        const r = await battleStart(battle, targets);
+        if (r) { stop(r.msg, false, r.alert); break; }
       }
-      if (Date.now() - battle.t > 90000) { stop("อยู่ในการต่อสู้นานผิดปกติ (อาจเป็นเทรนเนอร์ หรือมีหน้าต่างให้เลือก) — บอทหยุด"); break; }
-      if (cfg.mode === "hunt") {
-        // from any cursor position, Down then Right lands on "Run" (bottom-right); A also advances text
-        await tap("D"); await tap("R"); await tap("A"); await waitF(10);
-      } else {
-        const l = lead();
-        if (l) {
-          if (l.hp * 100 < l.maxHP * cfg.hpStop) { stop(`HP ของ ${nameOf(l.species)} เหลือ ${l.hp}/${l.maxHP} — บอทหยุดกลางการต่อสู้`); break; }
-          if (!l.moves[cfg.slot] || l.pp[cfg.slot] === 0) { stop(`ท่า ${moveName(l.moves[cfg.slot])} PP หมด — เปลี่ยนท่าหรือไปรักษา`); break; }
-          if (cfg.stopLearn && l.level > battle.lv && l.moves.every(Boolean)) { stop(`${nameOf(l.species)} เลเวลอัปเป็น ${l.level} — ถ้ามีท่าใหม่ให้เลือกเอง แล้วกดเริ่มบอทอีกครั้ง`); break; }
+      const m = await battleTick(battle, cfg.mode === "grind");
+      if (m) { stop(m); break; }
+    }
+  }
+
+  async function runNav() {
+    stats = { enc: 0, wins: 0, runs: 0, started: Date.now(), last: "" };
+    show("กำลังโหลดแผนที่…");
+    await loadMaps();
+    const goalIdx = MAPS.findIndex(m => m && m.n === cfg.dest);
+    if (goalIdx < 0) { stop("ยังไม่ได้เลือกปลายทาง หรือหาปลายทางไม่เจอ"); return; }
+    const goal = mi => mi === goalIdx;
+    if (cfg.fast) { try { gm().Module._set_ff_ratio(3); gm().Module._toggle_fastforward(1); } catch (e) {} }
+    const blocked = new Set(), blockedAt = new Map();
+    let path = null, i = 0, battle = null, fails = 0, noPath = 0, lastMove = Date.now(), best = 1e9, bestAt = Date.now();
+    status();
+    while (running) {
+      snap();
+      if (inBattle()) {
+        if (!battle) {
+          battle = { t: Date.now(), lv: (lead() || {}).level || 0 };
+          const r = await battleStart(battle, new Set());
+          if (r) { stop(r.msg, false, r.alert); break; }
         }
-        // FIGHT (top-left), then the move: slot 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right
-        await tap("U"); await tap("L"); await tap("A"); await waitF(8);
-        await tap("U"); await tap("L");
-        if (cfg.slot & 1) await tap("R");
-        if (cfg.slot & 2) await tap("D");
-        await tap("A"); await waitF(12);
+        // wild: run or fight as set; if running keeps failing (a trainer), fight
+        const fight = cfg.navFight || Date.now() - battle.t > 15000;
+        const m = await battleTick(battle, fight);
+        if (m) { stop(m); break; }
+        continue;
+      }
+      if (battle) {
+        battle = null; path = null;
+        const l = lead();
+        if (l && l.hp * 100 < l.maxHP * cfg.hpStop) { stop(`HP ของ ${nameOf(l.species)} เหลือ ${l.hp}/${l.maxHP} — แวะรักษาก่อน แล้วกดเริ่มอีกครั้ง`); break; }
+        await tap("B"); await tap("B");
+        continue;
+      }
+      const p = where();
+      const mi = p && MAPIDX[p.g * 256 + p.m], pm = mi !== undefined && MAPS[mi];
+      // during screen transitions (battle intro, warps) the numbers can be half-updated: wait for them to settle
+      if (!pm || p.x < 0 || p.y < 0 || p.x >= pm.w || p.y >= pm.h || (pm.tiles[p.y * pm.w + p.x] & 15) === T_WALL) { await waitF(10); continue; }
+      if (goal(mi)) { stop(`ถึง ${pretty(cfg.dest)} แล้ว ✓`, false, true); break; }
+      if (Date.now() - lastMove > 60000) { stop("เดินไม่ไปไหนมา 1 นาที — อาจติดเหตุการณ์ในเนื้อเรื่อง บอทหยุด"); break; }
+      // no step closer to the goal for a while: something in the story or a tree/rock blocks every way
+      if (path && path.length - 1 - i < best) { best = path.length - 1 - i; bestAt = Date.now(); }
+      if (Date.now() - bestAt > 45000) {
+        const where_ = pretty(pm.n);
+        stop(`ไปต่อไม่ได้ที่ ${where_} (${p.x},${p.y}) — ทางถูกขวางด้วยคน ต้นไม้ (Cut) หรือก้อนหิน ต้องทำเนื้อเรื่อง/ใช้ HM ก่อน`);
+        break;
+      }
+      // are we where the plan expects?
+      if (path && i < path.length) {
+        const s = path[i].s;
+        if (s[0] !== mi || s[1] !== p.x || s[2] !== p.y) {
+          const j = path.findIndex(q => q.s[0] === mi && q.s[1] === p.x && q.s[2] === p.y);
+          if (j > i) i = j; else path = null;
+        }
+      }
+      if (!path) {
+        for (const [k, t] of blockedAt) if (Date.now() - t > 20000) { blocked.delete(k); blockedAt.delete(k); }   // people move on
+        path = findPath(p, goal, blocked) || findPath(p, goal, blocked, false); i = 0;
+        if (!path && blocked.size) { blocked.clear(); blockedAt.clear(); path = findPath(p, goal, blocked) || findPath(p, goal, blocked, false); }
+        if (!path && ++noPath < 3) { await waitF(30); continue; }
+        if (!path) { window.__navDbg = { p, blocked: [...blocked], npcs: npcs() }; console.warn('NAVFAIL ' + JSON.stringify(window.__navDbg)); stop(`หาทางไป ${pretty(cfg.dest)} ไม่เจอ (อาจต้องใช้ Surf/Cut หรือยังผ่านไม่ได้ในเนื้อเรื่อง)`); break; }
+        noPath = 0; stats.last = `อีก ${path.length - 1} ก้าว`; status();
+      }
+      const step = path[i + 1];
+      if (!step) { path = null; continue; }
+      const before = JSON.stringify([mi, p.x, p.y]);
+      // hold the direction until the player moves (a step is 16 frames; warps take longer)
+      gm().simulateInput(0, K[step.d], 1);
+      const lim = step.how === "warp" ? 70 : step.how === "jump" ? 40 : 22;
+      let moved = false;
+      for (let f = 0; f < lim && running; f += 4) {
+        await waitF(4); snap();
+        const q = where();
+        if (inBattle() || (q && JSON.stringify([MAPIDX[q.g * 256 + q.m], q.x, q.y]) !== before)) { moved = true; break; }
+      }
+      gm().simulateInput(0, K[step.d], 0);
+      if (moved) {
+        fails = 0; lastMove = Date.now(); i++;
+        if (step.how === "warp" || step.how === "edge") { await waitF(step.how === "warp" ? 40 : 4); path = null; best = 1e9; bestAt = Date.now(); }
+        stats.last = `อีก ${Math.max(0, path ? path.length - 1 - i : 0)} ก้าว`; status();
+      } else {
+        // something in the way: a text box (story event, sign), a person, or the map differs from the data
+        fails++;
+        for (let k = 0; k < 3; k++) await tap("B", 4, 14);
+        if (fails >= 4) {
+          // treat that tile as blocked for a while and look for another way
+          const s = step.s; if (window.__navTrace) console.warn('NAVBLOCK ' + JSON.stringify({ at: [mi, p.x, p.y, p.z], step: s, d: step.d, how: step.how })); blocked.add(s[0] + ":" + s[1] + ":" + s[2]); blockedAt.set(s[0] + ":" + s[1] + ":" + s[2], Date.now());
+          path = null; fails = 0;
+        }
       }
     }
   }
@@ -199,11 +411,22 @@
       <div id="botMsg" hidden></div>
       <div id="botPanel" hidden>
         <h4>บอท <button class="x" id="botX">✕</button></h4>
-        <div class="segb" id="botMode"><button data-v="grind">ฟาร์มเลเวล</button><button data-v="hunt">ล่า Shiny / ตามหาตัว</button></div>
-        <div class="note">ยืนในพงหญ้าก่อนกดเริ่ม บอทจะเดินไปมา และ<b>หยุดทันทีเมื่อเจอ Shiny</b> ทุกโหมด</div>
-        <div>เดินไปมา</div>
-        <div class="segb" id="botDir"><button data-v="LR">ซ้าย ↔ ขวา</button><button data-v="UD">ขึ้น ↕ ลง</button></div>
-        <label class="row">จำนวนก้าวต่อฝั่ง <input type="number" id="botSteps" min="1" max="6"></label>
+        <div class="segb" id="botMode"><button data-v="grind">ฟาร์มเลเวล</button><button data-v="hunt">ล่า Shiny</button><button data-v="nav">นำทาง</button></div>
+        <div id="botWalk">
+          <div class="note">ยืนในพงหญ้าก่อนกดเริ่ม บอทจะเดินไปมา และ<b>หยุดทันทีเมื่อเจอ Shiny</b> ทุกโหมด</div>
+          <div>เดินไปมา</div>
+          <div class="segb" id="botDir"><button data-v="LR">ซ้าย ↔ ขวา</button><button data-v="UD">ขึ้น ↕ ลง</button></div>
+          <label class="row">จำนวนก้าวต่อฝั่ง <input type="number" id="botSteps" min="1" max="6"></label>
+        </div>
+        <div id="botNav">
+          <div>ไปที่</div>
+          <input id="botDest" list="botPlaces" placeholder="พิมพ์ชื่อ เช่น Cherrygrove, Violet Gym, Pokémon Center" style="width:100%;box-sizing:border-box;padding:10px;border-radius:10px;border:0;background:#2b2740;color:#fff;font:inherit;margin:6px 0">
+          <datalist id="botPlaces"></datalist>
+          <div class="note" id="botDestNote"></div>
+          <div>เจอโปเกมอนป่าระหว่างทาง</div>
+          <div class="segb" id="botNavFight"><button data-v="0">หนี</button><button data-v="1">สู้ด้วยท่าที่เลือก</button></div>
+          <div class="note">เทรนเนอร์หนีไม่ได้ บอทจะสู้ด้วยท่าที่เลือกด้านล่าง ถ้าเจอเหตุการณ์ในเนื้อเรื่องหรือทางที่ต้องใช้ Surf/Cut บอทจะหยุดให้คุณเล่นต่อ</div>
+        </div>
         <div id="botGrind">
           <div>ใช้ท่า</div>
           <div class="segb" id="botSlot"></div>
@@ -228,17 +451,35 @@
       b.onclick = e => { const v = e.target.dataset && e.target.dataset.v; if (v == null) return; cfg[key] = /^\d+$/.test(v) ? +v : v; saveCfg(); paint(); after && after(); };
       paint(); return paint;
     };
-    seg("botMode", "mode", ui); seg("botDir", "dir");
+    seg("botMode", "mode", () => { ui(); if (cfg.mode === "nav") fillPlaces(); }); seg("botDir", "dir");
+    const nf = el("botNavFight"), paintNf = () => [...nf.children].forEach(x => x.classList.toggle("sel", (cfg.navFight ? "1" : "0") === x.dataset.v));
+    nf.onclick = e => { const v = e.target.dataset && e.target.dataset.v; if (v == null) return; cfg.navFight = v === "1"; saveCfg(); paintNf(); }; paintNf();
+    el("botDest").value = cfg.dest ? pretty(cfg.dest) : "";
+    el("botDest").oninput = e => {
+      const v = e.target.value.trim().toLowerCase();
+      const hit = MAPS && MAPS.find(m => m && (pretty(m.n).toLowerCase() === v || m.n.toLowerCase() === v));
+      if (hit) { cfg.dest = hit.n; saveCfg(); }
+      el("botDestNote").textContent = hit ? "✓ " + pretty(hit.n) : (v ? "เลือกจากรายการที่ขึ้นมา" : "");
+    };
     const num = (id, key, lo, hi) => { const i = el(id); i.value = cfg[key]; i.onchange = () => { cfg[key] = Math.max(lo, Math.min(hi, +i.value || 0)); i.value = cfg[key]; saveCfg(); }; };
     num("botSteps", "steps", 1, 6); num("botHp", "hpStop", 0, 95); num("botLv", "lvStop", 0, 100);
     const chk = (id, key) => { const i = el(id); i.checked = !!cfg[key]; i.onchange = () => { cfg[key] = i.checked; saveCfg(); }; };
     chk("botFast", "fast"); chk("botLearn", "stopLearn");
     el("botTargets").value = cfg.targets; el("botTargets").oninput = e => { cfg.targets = e.target.value; saveCfg(); };
-    el("botPill").onclick = () => { el("botPanel").hidden = !el("botPanel").hidden; if (!el("botPanel").hidden) refreshMoves(); ui(); };
+    el("botPill").onclick = () => { el("botPanel").hidden = !el("botPanel").hidden; if (!el("botPanel").hidden) { refreshMoves(); if (cfg.mode === "nav") fillPlaces(); } ui(); };
     el("botX").onclick = () => { el("botPanel").hidden = true; };
     el("botGo").onclick = () => { if (running) stop("หยุดบอทแล้ว"); else { el("botPanel").hidden = true; start(); } };
     el("botMsg").onclick = () => { el("botMsg").hidden = true; };
     ui();
+  }
+  function fillPlaces() {
+    loadMaps().then(() => {
+      const dl = el("botPlaces"); if (dl.children.length) return;
+      // towns, routes, caves and the main buildings (skip houses and back rooms to keep the list short)
+      const skip = /House|Room|Backroom|Underwater|Frlg|_B\dF_|Unused|Test|Debug|Elevator/;
+      dl.innerHTML = MAPS.filter(m => m && !skip.test(m.n)).map(m => `<option value="${pretty(m.n)}">`).join("");
+      el("botDest").dispatchEvent(new Event("input"));
+    }).catch(() => {});
   }
   function refreshMoves() {
     let ms = null;
@@ -251,7 +492,8 @@
   }
   function ui() {
     if (!el || typeof el !== "function") return;
-    el("botGrind").hidden = cfg.mode !== "grind"; el("botHunt").hidden = cfg.mode !== "hunt";
+    el("botGrind").hidden = cfg.mode === "hunt"; el("botHunt").hidden = cfg.mode !== "hunt";
+    el("botNav").hidden = cfg.mode !== "nav"; el("botWalk").hidden = cfg.mode === "nav";
     el("botGo").textContent = running ? "■ หยุดบอท" : "▶ เริ่มบอท";
     el("botGo").classList.toggle("stop", running);
     el("botPill").classList.toggle("on", running);
@@ -260,7 +502,7 @@
   function status() {
     if (typeof el !== "function") return;
     const mins = stats.started ? Math.round((Date.now() - stats.started) / 60000) : 0;
-    el("botPill").textContent = running ? `🤖 ${cfg.mode === "grind" ? "ฟาร์ม" : "ล่า"} · ${stats.enc}` : "🤖 บอท";
+    el("botPill").textContent = running ? (cfg.mode === "nav" ? `🧭 ${stats.last || "นำทาง"}` : `🤖 ${cfg.mode === "grind" ? "ฟาร์ม" : "ล่า"} · ${stats.enc}`) : "🤖 บอท";
     el("botStat").textContent = stats.started ? `รอบล่าสุด: เจอ ${stats.enc} ตัว ใน ${mins} นาที${stats.last ? " · ตัวล่าสุด " + stats.last : ""}` : "";
   }
   let msgT;
@@ -272,7 +514,7 @@
   window.JVBot = {
     init(dataPath) {
       mount();
-      const base = (dataPath || "").replace(/data\/?$/, "");
+      const base = BASE = (dataPath || "").replace(/data\/?$/, "");
       fetch(base + "species.json").then(r => r.json()).then(j => {
         SPECIES = j;
         const dl = document.createElement("datalist"); dl.id = "botNames";
@@ -283,6 +525,6 @@
     },
     stop: () => stop(),
     get running() { return running; },
-    _debug: { snap, locate, mon, enemy, lead, inBattle, get addr() { return addr; } },
+    _debug: { snap, locate, mon, enemy, lead, inBattle, where, npcs, loadMaps, findPath, get MAPS() { return MAPS; }, get MAPIDX() { return MAPIDX; }, get addr() { return addr; } },
   };
 })();

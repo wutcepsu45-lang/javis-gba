@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 EJS=node_modules/@emulatorjs/emulatorjs/data
 CORE=node_modules/@emulatorjs/core-mgba
 rm -rf www && mkdir -p www/data/cores/reports
-cp src/index.html src/bot.js src/species.json src/moves.json www/
+cp src/index.html src/bot.js src/species.json src/moves.json src/maps.json www/
 cp -r "$EJS"/{loader.js,emulator.css,version.json,src,compression,localization} www/data/
 cp "$CORE"/mgba-wasm.data "$CORE"/mgba-legacy-wasm.data www/data/cores/
 cp "$CORE"/reports/mgba.json www/data/cores/reports/
