@@ -52,7 +52,8 @@
       for (let a = 0x03000000; a < 0x03007C00 - 0x440; a += 4) if (mainOk(a) && isRom(u32(a + 12)) && u32(a + 0x24) < 1e7) { addr.main = a; }
       if (!addr.main) return "หาข้อมูลเกมไม่เจอ (gMain)";
     }
-    if (!valid(mon(addr.party))) {
+    let blank = true; for (let i = 0; i < MON; i += 4) if (u32(addr.party + i)) { blank = false; break; }
+    if (!blank && !valid(mon(addr.party))) {   // an empty party (before the starter) keeps the known address
       addr.party = 0;
       for (let a = 0x02000000; a < 0x02040000 - MON * 7; a += 4) {
         if (!valid(mon(a))) continue;
@@ -233,6 +234,7 @@
     const err = locate();
     if (err) { stop(err, true); return; }
     if (cfg.mode === "nav") return runNav();
+    if (cfg.mode === "gift") return runGift();
     stats = { enc: 0, wins: 0, runs: 0, started: Date.now(), last: "" };
     const targets = targetIds();
     if (cfg.fast) { try { gm().Module._set_ff_ratio(3); gm().Module._toggle_fastforward(1); } catch (e) {} }
@@ -264,6 +266,87 @@
       }
       const m = await battleTick(battle, cfg.mode === "grind");
       if (m) { stop(m); break; }
+    }
+  }
+
+  // ---------- Shiny starter / gift Pokémon: reload a state until the Pokémon you receive is Shiny ----------
+  // Some gifts are rolled when a menu opens (SoulGold's starter case builds all its choices at once), so the
+  // bot starts from a state *before* talking, presses A, and checks every newly created Pokémon of the player's.
+  const SB2PTR = 0x030040C0, RNG = 0x03005A68;   // gRngValue: SFC32 {a, b, c, ctr}
+  function sfcStep(x) { const r = (x[0] + x[1] + x[3]) >>> 0; return [(x[1] ^ (x[1] >>> 9)) >>> 0, Math.imul(x[2], 9) >>> 0, (r + ((x[2] << 21) | (x[2] >>> 11))) >>> 0, (x[3] + 1) >>> 0]; }
+  function sfcSeed(seed) { let x = [0, 0, seed >>> 0, 1]; for (let i = 0; i < 16; i++) x = sfcStep(x); return x; }   // SeedRng(), stream 1
+  const rngAt = () => [0, 4, 8, 12].map(o => u32(RNG + o));
+  async function rngOk() {   // check that RNG really sits at that address: it must step forward frame by frame
+    snap(); let x = rngAt(); await waitF(3); snap(); const y = rngAt().join();
+    for (let k = 0; k < 400; k++) { x = sfcStep(x); if (x.join() === y) return true; }
+    return false;
+  }
+  function newMons(known, ot) {
+    const r = [];
+    for (let a = 0x02000000; a < 0x02040000 - MON; a += 4) {
+      const flags = st[at(a) + 21];
+      if (!(flags & 2) || u32(a + 4) !== ot) continue;
+      const m = mon(a);
+      if (m.species < 1 || m.species >= 1600 || m.level < 1 || m.level > 100 || known.has(m.pid)) continue;
+      if (!r.some(x => x.pid === m.pid)) r.push(m);
+    }
+    return r;
+  }
+  async function runGift() {
+    stats = { enc: 0, wins: 0, runs: 0, started: Date.now(), last: "" };
+    snap();
+    const base = st.slice();
+    const sb2 = u32(SB2PTR), ot = sb2 >= 0x02000000 && sb2 < 0x02040000 ? u32(sb2 + 10) : 0;
+    if (!ot) { stop("อ่านรหัสเทรนเนอร์ไม่ได้ — ลองใหม่ในฉากปกติ"); return; }
+    const known = new Set();
+    for (let a = 0x02000000; a < 0x02040000 - MON; a += 4) if ((st[at(a) + 21] & 2) && u32(a + 4) === ot) known.add(u32(a));
+    const want = new Set();
+    const names = (cfg.giftTargets || "").split(/[,\n]+/).map(x => x.trim().toLowerCase()).filter(Boolean);
+    for (const [id, n] of Object.entries(SPECIES)) if (names.includes(n.toLowerCase())) want.add(+id);
+    if (cfg.fast) { try { gm().Module._set_ff_ratio(4); gm().Module._toggle_fastforward(1); } catch (e) {} }
+    const seen = new Map(), offset = Math.floor(Math.random() * 30);
+    // reseeding the RNG in the saved state = turning the console off and on: every try is a fresh 1/256 roll
+    const reseed = await rngOk();
+    const rngOff = at(RNG);
+    status();
+    while (running) {
+      if (reseed) {
+        const v = new DataView(base.buffer, base.byteOffset, base.byteLength);
+        sfcSeed((Math.random() * 4294967296) >>> 0).forEach((w, i) => v.setUint32(rngOff + i * 4, w, true));
+      }
+      gm().loadState(base);
+      await waitF(2);
+      // the game's random number moves every frame: wait a different time before talking each try
+      // one more frame every try, so no two tries give the game the same random number
+      await waitF(1 + stats.enc + offset);
+      let got = [];
+      // text boxes only take A at set moments, so a single wait gets lined back up by them:
+      // a random pause before *every* press keeps the moment the gift is rolled different each try
+      for (let f = 0; f < 1500 && running && !got.length; f += 12) {
+        await waitF(Math.floor(Math.random() * 24));
+        await tap("A", 4, 8);
+        snap(); got = newMons(known, ot);
+      }
+      if (!running) break;
+      if (!got.length) {
+        stop(stats.enc ? "รอบนี้ไม่มีโปเกมอนใหม่ — บอทหยุด ลองเริ่มใหม่" : "กด A แล้วไม่มีโปเกมอนใหม่ — ยืนหันหน้าเข้าหา NPC/กล่องที่ให้โปเกมอน (ก่อนคุย) แล้วเริ่มใหม่");
+        break;
+      }
+      await waitF(6); snap(); got = newMons(known, ot);             // a menu may build several at once
+      stats.enc++;
+      const pool = want.size ? got.filter(m => want.has(m.species)) : got;
+      const shiny = pool.filter(m => m.shiny);
+      stats.last = got.map(m => nameOf(m.species) + (m.shiny ? "✨" : "")).slice(0, 4).join(", ") + (got.length > 4 ? "…" : "");
+      status();
+      if (shiny.length) {
+        const list = shiny.map(m => nameOf(m.species)).join(", ");
+        stop(`✨ รอบที่ ${stats.enc}: ${list} เป็น SHINY! บอทหยุดแล้ว — ${got.length > 1 ? "เลือกตัวนี้เองได้เลย แล้ว" : ""}กดเซฟในเกม`, false, true);
+        break;
+      }
+      if (want.size && !pool.length && stats.enc === 1) { stop("ตัวที่ใส่ไว้ไม่อยู่ในของขวัญนี้ — ตรวจชื่ออีกครั้ง"); break; }
+      const key = got.map(m => m.pid).sort().join(","), n = (seen.get(key) || 0) + 1; seen.set(key, n);
+      if (window.__navTrace) console.warn('NAVGIFT ' + JSON.stringify({ r: stats.enc, f: frame(), n: got.length, k: key.slice(0, 40) }));
+      if (n >= 4) { stop("ได้ตัวเดิมซ้ำหลายรอบ — ลองเซฟ State ให้เร็วขึ้นอีกหน่อย (ก่อนคุยกับ NPC) แล้วเริ่มใหม่"); break; }
     }
   }
 
@@ -411,7 +494,10 @@
       <div id="botMsg" hidden></div>
       <div id="botPanel" hidden>
         <h4>บอท <button class="x" id="botX">✕</button></h4>
-        <div class="segb" id="botMode"><button data-v="grind">ฟาร์มเลเวล</button><button data-v="hunt">ล่า Shiny</button><button data-v="nav">นำทาง</button></div>
+        <div class="segb" id="botMode"><button data-v="grind">ฟาร์มเลเวล</button><button data-v="hunt">ล่า Shiny</button><button data-v="nav">นำทาง</button><button data-v="gift">Shiny ตัวเริ่มต้น</button></div>
+        <div id="botGift"><div class="note">ยืนหันหน้าเข้าหากล่องตัวเริ่มต้นของ Elm (หรือ NPC ที่ให้โปเกมอน) <b>ก่อนกด A คุย</b> ทีมต้องมีช่องว่าง บอทจะโหลดกลับมาจุดนี้ซ้ำๆ แล้วดูว่าตัวที่เกมสุ่มให้เป็น Shiny ไหม (โอกาส 1/256 ต่อตัว) ใช้กับไข่ Togepi และโปเกมอนจาก Game Corner ได้ด้วย</div>
+          <div>อยากได้ตัวไหน (ชื่ออังกฤษ เว้นว่าง = ตัวไหนก็ได้)</div>
+          <input id="botGiftT" list="botNames" placeholder="เช่น Torchic" style="width:100%;box-sizing:border-box;padding:10px;border-radius:10px;border:0;background:#2b2740;color:#fff;font:inherit;margin:6px 0"></div>
         <div id="botWalk">
           <div class="note">ยืนในพงหญ้าก่อนกดเริ่ม บอทจะเดินไปมา และ<b>หยุดทันทีเมื่อเจอ Shiny</b> ทุกโหมด</div>
           <div>เดินไปมา</div>
@@ -465,6 +551,7 @@
     num("botSteps", "steps", 1, 6); num("botHp", "hpStop", 0, 95); num("botLv", "lvStop", 0, 100);
     const chk = (id, key) => { const i = el(id); i.checked = !!cfg[key]; i.onchange = () => { cfg[key] = i.checked; saveCfg(); }; };
     chk("botFast", "fast"); chk("botLearn", "stopLearn");
+    el("botGiftT").value = cfg.giftTargets || ""; el("botGiftT").oninput = e => { cfg.giftTargets = e.target.value; saveCfg(); };
     el("botTargets").value = cfg.targets; el("botTargets").oninput = e => { cfg.targets = e.target.value; saveCfg(); };
     el("botPill").onclick = () => { el("botPanel").hidden = !el("botPanel").hidden; if (!el("botPanel").hidden) { refreshMoves(); if (cfg.mode === "nav") fillPlaces(); } ui(); };
     el("botX").onclick = () => { el("botPanel").hidden = true; };
@@ -492,8 +579,8 @@
   }
   function ui() {
     if (!el || typeof el !== "function") return;
-    el("botGrind").hidden = cfg.mode === "hunt"; el("botHunt").hidden = cfg.mode !== "hunt";
-    el("botNav").hidden = cfg.mode !== "nav"; el("botWalk").hidden = cfg.mode === "nav";
+    el("botGrind").hidden = cfg.mode === "hunt" || cfg.mode === "gift"; el("botHunt").hidden = cfg.mode !== "hunt"; el("botGift").hidden = cfg.mode !== "gift";
+    el("botNav").hidden = cfg.mode !== "nav"; el("botWalk").hidden = cfg.mode === "nav" || cfg.mode === "gift";
     el("botGo").textContent = running ? "■ หยุดบอท" : "▶ เริ่มบอท";
     el("botGo").classList.toggle("stop", running);
     el("botPill").classList.toggle("on", running);
@@ -502,7 +589,7 @@
   function status() {
     if (typeof el !== "function") return;
     const mins = stats.started ? Math.round((Date.now() - stats.started) / 60000) : 0;
-    el("botPill").textContent = running ? (cfg.mode === "nav" ? `🧭 ${stats.last || "นำทาง"}` : `🤖 ${cfg.mode === "grind" ? "ฟาร์ม" : "ล่า"} · ${stats.enc}`) : "🤖 บอท";
+    el("botPill").textContent = running ? (cfg.mode === "nav" ? `🧭 ${stats.last || "นำทาง"}` : cfg.mode === "gift" ? `✨ รอบที่ ${stats.enc}` : `🤖 ${cfg.mode === "grind" ? "ฟาร์ม" : "ล่า"} · ${stats.enc}`) : "🤖 บอท";
     el("botStat").textContent = stats.started ? `รอบล่าสุด: เจอ ${stats.enc} ตัว ใน ${mins} นาที${stats.last ? " · ตัวล่าสุด " + stats.last : ""}` : "";
   }
   let msgT;
